@@ -81,7 +81,8 @@ func ExampleFile_GetPageLayout() {
 
 func TestNewSheet(t *testing.T) {
 	f := NewFile()
-	sheetID := f.NewSheet("Sheet2")
+	f.NewSheet("Sheet2")
+	sheetID := f.NewSheet("sheet2")
 	f.SetActiveSheet(sheetID)
 	// delete original sheet
 	f.DeleteSheet(f.GetSheetName(f.GetSheetIndex("Sheet1")))
@@ -122,7 +123,6 @@ func TestPageLayoutOption(t *testing.T) {
 
 	for i, test := range testData {
 		t.Run(fmt.Sprintf("TestData%d", i), func(t *testing.T) {
-
 			opt := test.nonDefault
 			t.Logf("option %T", opt)
 
@@ -188,12 +188,31 @@ func TestSearchSheet(t *testing.T) {
 	result, err = f.SearchSheet("Sheet1", "[0-9]", true)
 	assert.NoError(t, err)
 	assert.EqualValues(t, expected, result)
+	assert.NoError(t, f.Close())
 
 	// Test search worksheet data after set cell value
 	f = NewFile()
 	assert.NoError(t, f.SetCellValue("Sheet1", "A1", true))
 	_, err = f.SearchSheet("Sheet1", "")
 	assert.NoError(t, err)
+
+	f = NewFile()
+	f.Sheet.Delete("xl/worksheets/sheet1.xml")
+	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="A"><c r="2" t="str"><v>A</v></c></row></sheetData></worksheet>`))
+	f.checked = nil
+	result, err = f.SearchSheet("Sheet1", "A")
+	assert.EqualError(t, err, "strconv.Atoi: parsing \"A\": invalid syntax")
+	assert.Equal(t, []string(nil), result)
+
+	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="2"><c r="A" t="str"><v>A</v></c></row></sheetData></worksheet>`))
+	result, err = f.SearchSheet("Sheet1", "A")
+	assert.EqualError(t, err, newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
+	assert.Equal(t, []string(nil), result)
+
+	f.Pkg.Store("xl/worksheets/sheet1.xml", []byte(`<worksheet><sheetData><row r="0"><c r="A1" t="str"><v>A</v></c></row></sheetData></worksheet>`))
+	result, err = f.SearchSheet("Sheet1", "A")
+	assert.EqualError(t, err, "invalid cell coordinates [1, 0]")
+	assert.Equal(t, []string(nil), result)
 }
 
 func TestSetPageLayout(t *testing.T) {
@@ -215,10 +234,18 @@ func TestSetHeaderFooter(t *testing.T) {
 	assert.EqualError(t, f.SetHeaderFooter("SheetN", nil), "sheet SheetN is not exist")
 	// Test set header and footer with illegal setting.
 	assert.EqualError(t, f.SetHeaderFooter("Sheet1", &FormatHeaderFooter{
-		OddHeader: strings.Repeat("c", 256),
-	}), "field OddHeader must be less than 255 characters")
+		OddHeader: strings.Repeat("c", MaxFieldLength+1),
+	}), newFieldLengthError("OddHeader").Error())
 
 	assert.NoError(t, f.SetHeaderFooter("Sheet1", nil))
+	text := strings.Repeat("一", MaxFieldLength)
+	assert.NoError(t, f.SetHeaderFooter("Sheet1", &FormatHeaderFooter{
+		OddHeader:   text,
+		OddFooter:   text,
+		EvenHeader:  text,
+		EvenFooter:  text,
+		FirstHeader: text,
+	}))
 	assert.NoError(t, f.SetHeaderFooter("Sheet1", &FormatHeaderFooter{
 		DifferentFirst:   true,
 		DifferentOddEven: true,
@@ -248,10 +275,10 @@ func TestDefinedName(t *testing.T) {
 		Name:     "Amount",
 		RefersTo: "Sheet1!$A$2:$D$5",
 		Comment:  "defined name comment",
-	}), "the same name already exists on the scope")
+	}), ErrDefinedNameduplicate.Error())
 	assert.EqualError(t, f.DeleteDefinedName(&DefinedName{
 		Name: "No Exist Defined Name",
-	}), "no defined name on the scope")
+	}), ErrDefinedNameScope.Error())
 	assert.Exactly(t, "Sheet1!$A$2:$D$5", f.GetDefinedName()[1].RefersTo)
 	assert.NoError(t, f.DeleteDefinedName(&DefinedName{
 		Name: "Amount",
@@ -288,7 +315,7 @@ func TestInsertPageBreak(t *testing.T) {
 	assert.NoError(t, f.InsertPageBreak("Sheet1", "B2"))
 	assert.NoError(t, f.InsertPageBreak("Sheet1", "C3"))
 	assert.NoError(t, f.InsertPageBreak("Sheet1", "C3"))
-	assert.EqualError(t, f.InsertPageBreak("Sheet1", "A"), `cannot convert cell "A" to coordinates: invalid cell name "A"`)
+	assert.EqualError(t, f.InsertPageBreak("Sheet1", "A"), newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
 	assert.EqualError(t, f.InsertPageBreak("SheetN", "C3"), "sheet SheetN is not exist")
 	assert.NoError(t, f.SaveAs(filepath.Join("test", "TestInsertPageBreak.xlsx")))
 }
@@ -314,7 +341,7 @@ func TestRemovePageBreak(t *testing.T) {
 	assert.NoError(t, f.InsertPageBreak("Sheet2", "C2"))
 	assert.NoError(t, f.RemovePageBreak("Sheet2", "B2"))
 
-	assert.EqualError(t, f.RemovePageBreak("Sheet1", "A"), `cannot convert cell "A" to coordinates: invalid cell name "A"`)
+	assert.EqualError(t, f.RemovePageBreak("Sheet1", "A"), newCellNameToCoordinatesError("A", newInvalidCellNameError("A")).Error())
 	assert.EqualError(t, f.RemovePageBreak("SheetN", "C3"), "sheet SheetN is not exist")
 	assert.NoError(t, f.SaveAs(filepath.Join("test", "TestRemovePageBreak.xlsx")))
 }
@@ -326,6 +353,7 @@ func TestGetSheetName(t *testing.T) {
 	assert.Equal(t, "Sheet2", f.GetSheetName(1))
 	assert.Equal(t, "", f.GetSheetName(-1))
 	assert.Equal(t, "", f.GetSheetName(2))
+	assert.NoError(t, f.Close())
 }
 
 func TestGetSheetMap(t *testing.T) {
@@ -340,6 +368,7 @@ func TestGetSheetMap(t *testing.T) {
 		assert.Equal(t, expectedMap[idx], name)
 	}
 	assert.Equal(t, len(sheetMap), 2)
+	assert.NoError(t, f.Close())
 }
 
 func TestSetActiveSheet(t *testing.T) {
@@ -347,32 +376,44 @@ func TestSetActiveSheet(t *testing.T) {
 	f.WorkBook.BookViews = nil
 	f.SetActiveSheet(1)
 	f.WorkBook.BookViews = &xlsxBookViews{WorkBookView: []xlsxWorkBookView{}}
-	f.Sheet["xl/worksheets/sheet1.xml"].SheetViews = &xlsxSheetViews{SheetView: []xlsxSheetView{}}
+	ws, ok := f.Sheet.Load("xl/worksheets/sheet1.xml")
+	assert.True(t, ok)
+	ws.(*xlsxWorksheet).SheetViews = &xlsxSheetViews{SheetView: []xlsxSheetView{}}
 	f.SetActiveSheet(1)
-	f.Sheet["xl/worksheets/sheet1.xml"].SheetViews = nil
+	ws, ok = f.Sheet.Load("xl/worksheets/sheet1.xml")
+	assert.True(t, ok)
+	ws.(*xlsxWorksheet).SheetViews = nil
 	f.SetActiveSheet(1)
 	f = NewFile()
 	f.SetActiveSheet(-1)
 	assert.Equal(t, f.GetActiveSheetIndex(), 0)
+
+	f = NewFile()
+	f.WorkBook.BookViews = nil
+	idx := f.NewSheet("Sheet2")
+	ws, ok = f.Sheet.Load("xl/worksheets/sheet2.xml")
+	assert.True(t, ok)
+	ws.(*xlsxWorksheet).SheetViews = &xlsxSheetViews{SheetView: []xlsxSheetView{}}
+	f.SetActiveSheet(idx)
 }
 
 func TestSetSheetName(t *testing.T) {
 	f := NewFile()
-	// Test set workksheet with the same name.
+	// Test set worksheet with the same name.
 	f.SetSheetName("Sheet1", "Sheet1")
 	assert.Equal(t, "Sheet1", f.GetSheetName(0))
 }
 
 func TestGetWorkbookPath(t *testing.T) {
 	f := NewFile()
-	delete(f.XLSX, "_rels/.rels")
+	f.Pkg.Delete("_rels/.rels")
 	assert.Equal(t, "", f.getWorkbookPath())
 }
 
 func TestGetWorkbookRelsPath(t *testing.T) {
 	f := NewFile()
-	delete(f.XLSX, "xl/_rels/.rels")
-	f.XLSX["_rels/.rels"] = []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument" Target="/workbook.xml"/></Relationships>`)
+	f.Pkg.Delete("xl/_rels/.rels")
+	f.Pkg.Store("_rels/.rels", []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument" Target="/workbook.xml"/></Relationships>`))
 	assert.Equal(t, "_rels/workbook.xml.rels", f.getWorkbookRelsPath())
 }
 
@@ -398,6 +439,11 @@ func TestDeleteSheet(t *testing.T) {
 	assert.NoError(t, f.SaveAs(filepath.Join("test", "TestDeleteSheet2.xlsx")))
 }
 
+func TestDeleteAndAdjustDefinedNames(t *testing.T) {
+	deleteAndAdjustDefinedNames(nil, 0)
+	deleteAndAdjustDefinedNames(&xlsxWorkbook{}, 0)
+}
+
 func BenchmarkNewSheet(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -405,6 +451,7 @@ func BenchmarkNewSheet(b *testing.B) {
 		}
 	})
 }
+
 func newSheetWithSet() {
 	file := NewFile()
 	file.NewSheet("sheet1")
